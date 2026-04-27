@@ -100,9 +100,10 @@ async def generate_poll_options(api_key: str, topic: str) -> tuple[str, list[str
     )
 
     payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"maxOutputTokens": 200, "temperature": 1.2}
-    }
+    "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+    "contents": [{"role": "user", "parts": [{"text": f"Створи опитування на тему: '{topic}'\nВідповідай ТІЛЬКИ у форматі JSON:\n" + '{"question": "...", "options": ["...", "...", "...", "..."]}\nПитання макс 90 символів, кожен варіант макс 80 символів.'}]}],
+    "generationConfig": {"maxOutputTokens": 200, "temperature": 1.2}
+}
 
     try:
         async with httpx.AsyncClient(timeout=20) as client:
@@ -143,17 +144,17 @@ async def generate_meme_text(
     )
     if context:
         prompt += f"Контекст: {context}\n"
-    prompt += (
-        "Відповідай ТІЛЬКИ у форматі JSON:\n"
-        '{"top": "текст зверху", "bottom": "текст знизу"}\n'
-        "Кожен рядок макс 50 символів. Можна залишити top або bottom порожнім."
-    )
-    parts.append({"text": prompt})
+    meme_prompt = "Створи підпис для мему. "
+    if context:
+        meme_prompt += f"Контекст: {context}\n"
+    meme_prompt += 'Відповідай ТІЛЬКИ у форматі JSON:\n{"top": "текст зверху", "bottom": "текст знизу"}\nКожен рядок макс 50 символів.'
+    parts.append({"text": meme_prompt})
 
     payload = {
-        "contents": [{"parts": parts}],
-        "generationConfig": {"maxOutputTokens": 100, "temperature": 1.3}
-    }
+    "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+    "contents": [{"role": "user", "parts": parts}],
+    "generationConfig": {"maxOutputTokens": 100, "temperature": 1.3}
+}
 
     try:
         async with httpx.AsyncClient(timeout=20) as client:
