@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 GEMINI_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
-    "gemini-1.5-flash:generateContent"
+    "gemini-2.0-flash:generateContent"
 )
 
 # Системний промпт — характер жаби
