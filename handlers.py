@@ -40,6 +40,7 @@ async def save_image_as_template(bot: Bot, file_id: str):
         with open(path, "wb") as f:
             f.write(data)
         db.save_template(file_id, path, source="chat")
+        logger.info(f"Saved template: {path}")
     except Exception as e:
         logger.error(f"Template save error: {e}")
 
@@ -55,24 +56,38 @@ def get_context(msg: Message) -> str:
     return " ".join(parts).strip()
 
 
-async def safe_gemini_text(context: str, image_bytes=None, image_mime="image/jpeg") -> str:
-    """Gemini або fallback — завжди повертає рядок."""
+async def safe_text(context: str, image_bytes=None, image_mime="image/jpeg") -> str:
+    """Завжди повертає рядок — Gemini або fallback."""
     try:
         result = await brain.call_gemini(GEMINI_API_KEY, context, image_bytes, image_mime)
         if result:
             return result
     except Exception as e:
-        logger.error(f"safe_gemini_text error: {e}")
+        logger.error(f"Gemini error: {e}")
     return brain.get_fallback()
+
+
+async def get_any_image(bot: Bot, message: Message) -> bytes | None:
+    """Бере картинку з повідомлення або рандомний шаблон."""
+    # Спочатку рандомний шаблон щоб не відповідати тією ж картинкою
+    tmpl = db.get_random_template()
+    if tmpl:
+        try:
+            with open(tmpl["local_path"], "rb") as f:
+                return f.read()
+        except Exception:
+            pass
+    # Якщо шаблонів нема — картинка з повідомлення
+    if message.photo:
+        best = max(message.photo, key=lambda p: p.file_size or 0)
+        return await download_file(bot, best.file_id)
+    return None
 
 
 async def respond(message: Message, bot: Bot):
     chat_id = message.chat.id
     rtype = brain.pick_response_type()
-
-    # Якщо шаблонів мало — тільки текст/стікер/гіфка
-    if db.get_template_count() < 5 and rtype in ("meme", "demotivator"):
-        rtype = random.choice(["text", "text", "sticker"])
+    context = get_context(message)
 
     image_bytes = None
     image_mime = "image/jpeg"
@@ -80,24 +95,28 @@ async def respond(message: Message, bot: Bot):
         best = max(message.photo, key=lambda p: p.file_size or 0)
         image_bytes = await download_file(bot, best.file_id)
 
-    context = get_context(message)
-
     try:
         if rtype == "sticker":
             fid = db.get_random_sticker(chat_id)
             if fid:
-                await message.reply_sticker(fid)
-                return
-            rtype = "text"  # fallthrough
+                try:
+                    await message.reply_sticker(fid)
+                    return
+                except Exception:
+                    pass
+            # fallthrough до тексту
 
-        if rtype == "gif":
+        elif rtype == "gif":
             fid = db.get_random_gif(chat_id)
             if fid:
-                await message.reply_animation(fid)
-                return
-            rtype = "text"  # fallthrough
+                try:
+                    await message.reply_animation(fid)
+                    return
+                except Exception:
+                    pass
+            # fallthrough до тексту
 
-        if rtype == "poll":
+        elif rtype == "poll":
             result = await brain.generate_poll_options(GEMINI_API_KEY, context or "щось важливе")
             if result:
                 q, opts = result
@@ -110,46 +129,39 @@ async def respond(message: Message, bot: Bot):
                         is_anonymous=False,
                     )
                     return
-            rtype = "text"  # fallthrough
+            # fallthrough до тексту
 
-        if rtype == "demotivator":
-            img = None
-            tmpl = db.get_random_template()
-            if tmpl:
+        elif rtype == "demotivator":
+            img = await get_any_image(bot, message)
+            if img:
+                # Текст — Gemini або fallback, не блокуємо
+                mt = None
                 try:
-                    with open(tmpl["local_path"], "rb") as f:
-                        img = f.read()
+                    mt = await brain.generate_meme_text(GEMINI_API_KEY, context, image_bytes, image_mime)
                 except Exception:
                     pass
-            if not img:
-                img = image_bytes
-            if img:
-                mt = await brain.generate_meme_text(GEMINI_API_KEY, context, image_bytes, image_mime)
                 title = (mt[0] or mt[1]) if mt and (mt[0] or mt[1]) else brain.get_fallback()
-                subtitle = (mt[1] if mt else "") or ""
+                subtitle = (mt[1] if mt and mt[0] else "") or ""
                 result_bytes = meme_maker.make_demotivator(img, title, subtitle)
                 await message.reply_photo(BufferedInputFile(result_bytes, "demotivator.jpg"))
                 return
-            rtype = "text"  # fallthrough
+            # fallthrough до тексту
 
-        if rtype == "meme":
-            img = None
-            tmpl = db.get_random_template()
-            if tmpl:
+        elif rtype == "meme":
+            img = await get_any_image(bot, message)
+            if img:
+                mt = None
                 try:
-                    with open(tmpl["local_path"], "rb") as f:
-                        img = f.read()
+                    mt = await brain.generate_meme_text(GEMINI_API_KEY, context, image_bytes, image_mime)
                 except Exception:
                     pass
-            if not img:
-                img = image_bytes
-            if img:
-                mt = await brain.generate_meme_text(GEMINI_API_KEY, context, image_bytes, image_mime)
                 top = mt[0] if mt else ""
                 bottom = mt[1] if mt else brain.get_fallback()
+
+                # Колаж якщо є другий шаблон
                 if random.random() < 0.4:
                     tmpl2 = db.get_random_template()
-                    if tmpl2 and tmpl2["local_path"] != (tmpl["local_path"] if tmpl else ""):
+                    if tmpl2:
                         try:
                             with open(tmpl2["local_path"], "rb") as f:
                                 img2 = f.read()
@@ -161,15 +173,14 @@ async def respond(message: Message, bot: Bot):
                 result_bytes = meme_maker.make_impact_meme(img, top, bottom)
                 await message.reply_photo(BufferedInputFile(result_bytes, "meme.jpg"))
                 return
-            rtype = "text"  # fallthrough
+            # fallthrough до тексту
 
-        # text — завжди спрацює
-        txt = await safe_gemini_text(context, image_bytes, image_mime)
+        # Текст — завжди спрацює
+        txt = await safe_text(context, image_bytes, image_mime)
         await message.reply(txt)
 
     except Exception as e:
-        logger.error(f"respond error: {e}")
-        # Останній рятувальний круг
+        logger.error(f"respond error ({rtype}): {e}")
         try:
             await message.reply(brain.get_fallback())
         except Exception:
@@ -178,10 +189,13 @@ async def respond(message: Message, bot: Bot):
 
 @router.message(F.chat.type.in_({"group", "supergroup"}))
 async def handle_group(message: Message, bot: Bot):
-    # Зберігаємо дані
     text = message.text or message.caption or ""
     if text and len(text) > 3 and not text.startswith("/"):
-        db.save_message(message.chat.id, message.from_user.id if message.from_user else 0, text)
+        db.save_message(
+            message.chat.id,
+            message.from_user.id if message.from_user else 0,
+            text
+        )
 
     if message.sticker:
         db.save_sticker(message.chat.id, message.sticker.file_id)
@@ -189,11 +203,13 @@ async def handle_group(message: Message, bot: Bot):
     if message.animation:
         db.save_gif(message.chat.id, message.animation.file_id)
 
-    if message.photo and random.random() < 0.3:
-        best = max(message.photo, key=lambda p: p.file_size or 0)
-        await save_image_as_template(bot, best.file_id)
+    # Краде кожну картинку (100% поки шаблонів < 20, потім 30%)
+    if message.photo:
+        threshold = 1.0 if db.get_template_count() < 20 else 0.3
+        if random.random() < threshold:
+            best = max(message.photo, key=lambda p: p.file_size or 0)
+            await save_image_as_template(bot, best.file_id)
 
-    # Ігноруємо ботів
     if message.from_user and message.from_user.is_bot:
         return
 
@@ -211,7 +227,7 @@ async def cmd_status(message: Message):
         f"🐸 стан жаби:\n"
         f"• повідомлень: {msgs}\n"
         f"• шаблонів мемів: {templates}\n"
-        f"• живий: так"
+        f"• жива: так, але втомлена"
     )
 
 
