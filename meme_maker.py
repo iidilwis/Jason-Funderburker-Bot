@@ -1,151 +1,139 @@
-"""
-Генератор мемів і демотиваторів через Pillow.
-"""
-
 from PIL import Image, ImageDraw, ImageFont
 import textwrap
 import io
 import os
+import glob
 import random
 import logging
+import urllib.request
 
 logger = logging.getLogger(__name__)
 
-# Шляхи до шрифтів (DejaVu є майже скрізь)
-FONT_PATHS = [
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-    "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
-    "/usr/share/fonts/truetype/ubuntu/Ubuntu-B.ttf",
-]
+FONT_CACHE = {}
+FONT_URL = "https://github.com/googlefonts/roboto/raw/main/src/hinted/Roboto-Bold.ttf"
+LOCAL_FONT = "/tmp/bot_font.ttf"
+
+
+def _find_system_font() -> str | None:
+    patterns = [
+        "/nix/store/*/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/nix/store/*/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "/root/.nix-profile/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/truetype/ubuntu/Ubuntu-B.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
+    ]
+    for pattern in patterns:
+        results = glob.glob(pattern, recursive=True)
+        if results:
+            return results[0]
+    return None
 
 
 def _get_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    for path in FONT_PATHS:
-        if os.path.exists(path):
-            try:
-                return ImageFont.truetype(path, size)
-            except Exception:
-                continue
+    if size in FONT_CACHE:
+        return FONT_CACHE[size]
+
+    # 1. Локально завантажений
+    if os.path.exists(LOCAL_FONT):
+        try:
+            f = ImageFont.truetype(LOCAL_FONT, size)
+            FONT_CACHE[size] = f
+            return f
+        except Exception:
+            pass
+
+    # 2. Системний шрифт
+    path = _find_system_font()
+    if path:
+        try:
+            f = ImageFont.truetype(path, size)
+            FONT_CACHE[size] = f
+            return f
+        except Exception:
+            pass
+
+    # 3. Завантажити з інтернету
+    try:
+        logger.info("Downloading font...")
+        urllib.request.urlretrieve(FONT_URL, LOCAL_FONT)
+        f = ImageFont.truetype(LOCAL_FONT, size)
+        FONT_CACHE[size] = f
+        logger.info("Font downloaded ok")
+        return f
+    except Exception as e:
+        logger.error(f"Font download failed: {e}")
+
     return ImageFont.load_default()
 
 
-def _draw_text_with_outline(
-    draw: ImageDraw.ImageDraw,
-    xy: tuple,
-    text: str,
-    font,
-    fill=(255, 255, 255),
-    outline=(0, 0, 0),
-    outline_width: int = 2,
-):
+def _draw_outlined(draw, xy, text, font, fill=(255,255,255), outline=(0,0,0), width=2):
     x, y = xy
-    for dx in range(-outline_width, outline_width + 1):
-        for dy in range(-outline_width, outline_width + 1):
-            if dx != 0 or dy != 0:
-                draw.text((x + dx, y + dy), text, font=font, fill=outline)
+    for dx in range(-width, width+1):
+        for dy in range(-width, width+1):
+            if dx or dy:
+                draw.text((x+dx, y+dy), text, font=font, fill=outline)
     draw.text((x, y), text, font=font, fill=fill)
 
 
-def make_demotivator(
-    image_bytes: bytes,
-    title: str,
-    subtitle: str = "",
-) -> bytes:
-    """
-    Класичний демотиватор: чорний фон, біла рамка, картинка, текст знизу.
-    """
+def make_demotivator(image_bytes: bytes, title: str, subtitle: str = "") -> bytes:
     try:
         src = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     except Exception:
         src = Image.new("RGB", (400, 300), (50, 50, 50))
 
-    # Масштабуємо картинку
-    max_w, max_h = 500, 400
-    src.thumbnail((max_w, max_h), Image.LANCZOS)
-    img_w, img_h = src.size
+    src.thumbnail((500, 400), Image.LANCZOS)
+    iw, ih = src.size
 
     border = 3
-    padding = 20
-    title_font_size = max(22, img_w // 18)
-    sub_font_size = max(16, img_w // 26)
-    title_font = _get_font(title_font_size)
-    sub_font = _get_font(sub_font_size)
+    pad = 20
+    font_size = max(22, iw // 18)
+    sub_size = max(16, iw // 26)
+    font = _get_font(font_size)
+    sfont = _get_font(sub_size)
 
-    # Рахуємо висоту тексту
-    dummy = Image.new("RGB", (1, 1))
-    d = ImageDraw.Draw(dummy)
-    title_wrapped = textwrap.fill(title, width=30)
-    t_bbox = d.multiline_textbbox((0, 0), title_wrapped, font=title_font)
-    t_h = t_bbox[3] - t_bbox[1] + 10
+    dummy = ImageDraw.Draw(Image.new("RGB", (1,1)))
+    tw = textwrap.fill(title, width=30)
+    tb = dummy.multiline_textbbox((0,0), tw, font=font)
+    th = tb[3] - tb[1] + 10
 
-    sub_h = 0
-    sub_wrapped = ""
+    sw = ""
+    sh = 0
     if subtitle:
-        sub_wrapped = textwrap.fill(subtitle, width=40)
-        s_bbox = d.multiline_textbbox((0, 0), sub_wrapped, font=sub_font)
-        sub_h = s_bbox[3] - s_bbox[1] + 8
+        sw = textwrap.fill(subtitle, width=40)
+        sb = dummy.multiline_textbbox((0,0), sw, font=sfont)
+        sh = sb[3] - sb[1] + 8
 
-    canvas_w = img_w + padding * 2 + border * 2
-    canvas_h = img_h + padding * 2 + border * 2 + t_h + sub_h + padding
+    cw = iw + pad*2 + border*2
+    ch = ih + pad*2 + border*2 + th + sh + pad
 
-    canvas = Image.new("RGB", (canvas_w, canvas_h), (0, 0, 0))
-
-    # Рамка навколо картинки
-    img_x = padding
-    img_y = padding
-    for i in range(border):
-        rect_draw = ImageDraw.Draw(canvas)
-        rect_draw.rectangle(
-            [img_x - i - 1, img_y - i - 1,
-             img_x + img_w + i, img_y + img_h + i],
-            outline=(255, 255, 255)
-        )
-
-    canvas.paste(src, (img_x, img_y))
-
+    canvas = Image.new("RGB", (cw, ch), (0,0,0))
+    ix, iy = pad, pad
     draw = ImageDraw.Draw(canvas)
+    for i in range(border):
+        draw.rectangle([ix-i-1, iy-i-1, ix+iw+i, iy+ih+i], outline=(255,255,255))
+    canvas.paste(src, (ix, iy))
 
-    # Заголовок
-    text_y = img_y + img_h + border + padding // 2
-    t_bbox2 = draw.multiline_textbbox((0, 0), title_wrapped, font=title_font)
-    t_w = t_bbox2[2] - t_bbox2[0]
-    draw.multiline_text(
-        ((canvas_w - t_w) // 2, text_y),
-        title_wrapped,
-        font=title_font,
-        fill=(255, 255, 255),
-        align="center"
-    )
+    ty = iy + ih + border + pad//2
+    tb2 = draw.multiline_textbbox((0,0), tw, font=font)
+    draw.multiline_text(((cw-(tb2[2]-tb2[0]))//2, ty), tw, font=font, fill=(255,255,255), align="center")
 
-    # Підзаголовок
-    if sub_wrapped:
-        sub_y = text_y + t_h
-        s_bbox2 = draw.multiline_textbbox((0, 0), sub_wrapped, font=sub_font)
-        s_w = s_bbox2[2] - s_bbox2[0]
-        draw.multiline_text(
-            ((canvas_w - s_w) // 2, sub_y),
-            sub_wrapped,
-            font=sub_font,
-            fill=(180, 180, 180),
-            align="center"
-        )
+    if sw:
+        sb2 = draw.multiline_textbbox((0,0), sw, font=sfont)
+        draw.multiline_text(((cw-(sb2[2]-sb2[0]))//2, ty+th), sw, font=sfont, fill=(180,180,180), align="center")
 
     buf = io.BytesIO()
     canvas.save(buf, format="JPEG", quality=88)
     return buf.getvalue()
 
 
-def make_impact_meme(
-    image_bytes: bytes,
-    top_text: str = "",
-    bottom_text: str = "",
-) -> bytes:
-    """Мем з Impact-стилем текстом зверху і знизу."""
+def make_impact_meme(image_bytes: bytes, top_text: str = "", bottom_text: str = "") -> bytes:
     try:
         img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     except Exception:
-        img = Image.new("RGB", (500, 400), (30, 30, 30))
+        img = Image.new("RGB", (500, 400), (30,30,30))
 
     img.thumbnail((600, 600), Image.LANCZOS)
     w, h = img.size
@@ -153,31 +141,23 @@ def make_impact_meme(
     font_size = max(28, w // 12)
     font = _get_font(font_size)
 
-    def draw_centered(text: str, y: int):
+    def draw_centered(text, y):
         wrapped = textwrap.fill(text.upper(), width=20)
         lines = wrapped.split("\n")
         for i, line in enumerate(lines):
-            bbox = draw.textbbox((0, 0), line, font=font)
-            lw = bbox[2] - bbox[0]
-            lh = bbox[3] - bbox[1]
-            _draw_text_with_outline(
-                draw,
-                ((w - lw) // 2, y + i * (lh + 4)),
-                line,
-                font=font,
-                outline_width=3
-            )
+            bb = draw.textbbox((0,0), line, font=font)
+            lw = bb[2]-bb[0]
+            lh = bb[3]-bb[1]
+            _draw_outlined(draw, ((w-lw)//2, y + i*(lh+4)), line, font)
 
     if top_text:
         draw_centered(top_text, 10)
     if bottom_text:
-        # Рахуємо знизу
         wrapped = textwrap.fill(bottom_text.upper(), width=20)
         lines = wrapped.split("\n")
-        bbox = draw.textbbox((0, 0), "A", font=font)
-        line_h = bbox[3] - bbox[1] + 4
-        total_h = len(lines) * line_h
-        draw_centered(bottom_text, h - total_h - 15)
+        bb = draw.textbbox((0,0), "A", font=font)
+        lh = bb[3]-bb[1]+4
+        draw_centered(bottom_text, h - len(lines)*lh - 15)
 
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=88)
@@ -185,7 +165,6 @@ def make_impact_meme(
 
 
 def make_collage(image_bytes_list: list[bytes]) -> bytes:
-    """Колаж з 2-3 картинок поряд."""
     imgs = []
     for b in image_bytes_list:
         try:
@@ -194,23 +173,19 @@ def make_collage(image_bytes_list: list[bytes]) -> bytes:
             imgs.append(im)
         except Exception:
             continue
-
     if not imgs:
-        blank = Image.new("RGB", (400, 300), (20, 20, 20))
+        blank = Image.new("RGB", (400,300), (20,20,20))
         buf = io.BytesIO()
         blank.save(buf, format="JPEG")
         return buf.getvalue()
-
     gap = 4
-    total_w = sum(im.width for im in imgs) + gap * (len(imgs) - 1)
+    total_w = sum(im.width for im in imgs) + gap*(len(imgs)-1)
     max_h = max(im.height for im in imgs)
-    canvas = Image.new("RGB", (total_w, max_h), (0, 0, 0))
-
+    canvas = Image.new("RGB", (total_w, max_h), (0,0,0))
     x = 0
     for im in imgs:
-        canvas.paste(im, (x, (max_h - im.height) // 2))
+        canvas.paste(im, (x, (max_h-im.height)//2))
         x += im.width + gap
-
     buf = io.BytesIO()
     canvas.save(buf, format="JPEG", quality=85)
     return buf.getvalue()

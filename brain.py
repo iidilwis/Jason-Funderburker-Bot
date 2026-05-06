@@ -9,32 +9,37 @@ import json
 import random
 import logging
 import io
+import asyncio
+import time
 
 logger = logging.getLogger(__name__)
+
+# Простий rate limiter — не більше 1 запиту в 4 секунди
+_last_gemini_call = 0.0
+_gemini_lock = asyncio.Lock()
 
 GEMINI_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
     "gemini-2.0-flash:generateContent"
 )
 
-SYSTEM_PROMPT = """Ти — жаба-бот в телеграм-каналі "Маленький кавунчик". 
-Твій стиль: хаотичний мікс української, російської та англійської мови в одному реченні (суржик + інтернет-сленг).
-Ти абсурдний, іронічний, іноді nihilistic, іноді ніжний.
-Використовуй мат природньо але не часто. Емодзі — зрідка.
+SYSTEM_PROMPT = """Ти — жаба-бот. Відповідай ТІЛЬКИ суржиком — мікс української, російської та англійської в одному реченні.
 
-ПРАВИЛА:
-- Відповідай ДУЖЕ коротко: 1-3 речення максимум
-- 70% часу відповідай якось пов'язано з темою, 30% — повний рандомний абсурд
-- Мікс мов в одному реченні це норма ("ну і що з того what can i say")
-- Не пояснюй себе, не вибачайся, просто кажи
-- Можеш посилатись на меми, аніме (особливо Євангеліон), пострадянський побут
+ОБОВ'ЯЗКОВО:
+- Пиши кирилицею (українська або російська), можна вкраплювати англійські слова
+- НІКОЛИ не пиши суто англійською
+- Максимум 1-2 речення
+- Абсурдний тон, іноді мат, без пояснень
 
-Приклади твоїх відповідей:
+Приклади (саме так треба відповідати):
 - "ну це буквально я о 3 ночі wtf"
 - "прогрес неможливий без страждань і піци"
-- "я б прокоментував але в мене дедлайн з існуванням"
+- "я б прокоментував але deadline з існуванням"
 - "це called being perceived і я проти"
-- "хтось скажіть що так не можна або навпаки можна"
+- "хз хз але sounds like my problem"
+- "third impact вже скоро судячи з усього"
+- "болото болотом але shit happens"
+- "ок і шо далі питання"
 """
 
 FALLBACK_PHRASES = [
@@ -92,6 +97,14 @@ def _make_payload(user_parts: list, max_tokens: int = 150, temperature: float = 
 
 
 async def _post_gemini(api_key: str, payload: dict) -> str | None:
+    global _last_gemini_call
+    async with _gemini_lock:
+        # Чекаємо якщо запит був менше 4 секунд тому
+        elapsed = time.time() - _last_gemini_call
+        if elapsed < 4.0:
+            await asyncio.sleep(4.0 - elapsed)
+        _last_gemini_call = time.time()
+
     try:
         async with httpx.AsyncClient(timeout=20) as client:
             resp = await client.post(

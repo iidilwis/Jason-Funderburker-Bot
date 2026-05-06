@@ -1,0 +1,8 @@
+[phases.setup]
+nixPkgs = ["dejavu_fonts", "liberation_ttf", "unifont"]
+
+[phases.build]
+cmds = ["pip install -r requirements.txt"]
+
+[start]
+cmd = "python main.py"
